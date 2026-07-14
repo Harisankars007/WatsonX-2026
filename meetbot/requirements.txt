@@ -1,5 +1,0 @@
-ibm-watsonx-ai>=1.5.0
-requests>=2.31.0
-selenium>=4.15.0
-pyaudio>=0.2.14
-websocket-client>=1.6.0
