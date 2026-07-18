@@ -10,16 +10,21 @@ import base64
 import json
 import time
 import queue
+import audioop
 import websocket
 from websocket import ABNF
 
 from config import (
     STT_WS_URL, STT_API_KEY,
-    AUDIO_SAMPLE_RATE, AUDIO_CHANNELS, AUDIO_CHUNK_SIZE,
+    AUDIO_SAMPLE_RATE, AUDIO_STT_RATE, AUDIO_CHANNELS, AUDIO_CHUNK_SIZE,
     VIRTUAL_AUDIO_DEVICE
 )
 
 log = logging.getLogger("MeetBot.Audio")
+
+
+# Downsample ratio: BlackHole native 48000 → IBM STT 16000
+_DOWNSAMPLE_RATIO = AUDIO_SAMPLE_RATE // AUDIO_STT_RATE   # = 3
 
 
 def find_audio_device(name=VIRTUAL_AUDIO_DEVICE):
@@ -57,12 +62,12 @@ class LiveTranscriber:
 
     def _on_ws_open(self, ws):
         log.info("🔗 IBM STT WebSocket connected.")
-        # Send start message
+        # Tell IBM STT we are sending 16kHz mono PCM
         start_msg = json.dumps({
             "action": "start",
-            "content-type": f"audio/l16;rate={AUDIO_SAMPLE_RATE};channels={AUDIO_CHANNELS}",
+            "content-type": f"audio/l16;rate={AUDIO_STT_RATE};channels=1",
             "interim_results": True,
-            "speaker_labels": True,
+            "speaker_labels": False,
             "timestamps": True,
             "max_alternatives": 1,
             "inactivity_timeout": -1
@@ -126,19 +131,26 @@ class LiveTranscriber:
 
     def _capture_audio(self):
         p = pyaudio.PyAudio()
+        # Open at BlackHole's native rate (48kHz) and stereo (2ch)
         stream = p.open(
             format=pyaudio.paInt16,
-            channels=AUDIO_CHANNELS,
-            rate=AUDIO_SAMPLE_RATE,
+            channels=2,                     # BlackHole 2ch is stereo
+            rate=AUDIO_SAMPLE_RATE,         # 48000 Hz native
             input=True,
             input_device_index=self.device_index,
             frames_per_buffer=AUDIO_CHUNK_SIZE
         )
-        log.info("🎧 Audio capture started.")
+        log.info("🎧 Audio capture started (48kHz stereo → 16kHz mono for STT).")
         while self.running:
             try:
                 data = stream.read(AUDIO_CHUNK_SIZE, exception_on_overflow=False)
-                self.audio_queue.put(data)
+                # Step 1: stereo → mono (average L+R channels)
+                mono = audioop.tomono(data, 2, 0.5, 0.5)
+                # Step 2: 48kHz → 16kHz (factor of 3)
+                downsampled, _ = audioop.ratecv(mono, 2, 1,
+                                                AUDIO_SAMPLE_RATE, AUDIO_STT_RATE,
+                                                None)
+                self.audio_queue.put(downsampled)
             except Exception as e:
                 log.warning(f"Audio read error: {e}")
         stream.stop_stream()

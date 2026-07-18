@@ -13,7 +13,7 @@ load_dotenv(dotenv_path=_env_path)
 
 
 # Google Meet
-MEET_URL         = os.environ.get("MEET_URL", "https://meet.google.com/xxx-xxxx-xxx")
+MEET_URL         = os.environ.get("MEET_URL", "https://meet.google.com/aty-hpzp-apn")
 BOT_DISPLAY_NAME = "MeetBot 🤖"
 BOT_EMAIL        = os.environ.get("BOT_EMAIL", "")
 BOT_PASSWORD     = os.environ.get("BOT_PASSWORD", "")
@@ -30,7 +30,11 @@ WATSONX_PROJECT = os.environ.get("WATSONX_PROJECT", "")
 WATSONX_MODEL   = "meta-llama/llama-3-3-70b-instruct"
 
 # Audio
-AUDIO_SAMPLE_RATE    = 16000
+# BlackHole 2ch native rate is 48000 Hz — must match or PyAudio will resample
+# silently and IBM STT needs 16kHz, so we capture at 48k and tell STT 16k via
+# the downsample factor (handled in audio_capture.py).
+AUDIO_SAMPLE_RATE    = 48000   # native BlackHole rate
+AUDIO_STT_RATE       = 16000   # what IBM STT expects
 AUDIO_CHANNELS       = 1
 AUDIO_CHUNK_SIZE     = 4096
 VIRTUAL_AUDIO_DEVICE = "BlackHole 2ch"
