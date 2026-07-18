@@ -1,5 +1,6 @@
 """
 Phase 1: Bot joins Google Meet as a participant using Selenium.
+Uses Selenium Manager (built-in) — no separate ChromeDriver needed.
 """
 
 import time
@@ -7,7 +8,6 @@ import logging
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
@@ -19,7 +19,8 @@ log = logging.getLogger("MeetBot.Join")
 
 
 def get_driver():
-    """Set up Chrome with required flags for audio capture."""
+    """Set up Chrome with required flags for audio capture.
+    Uses Selenium Manager (built-in since Selenium 4.6) — no ChromeDriver install needed."""
     options = Options()
 
     # Allow microphone and camera without prompts
@@ -76,14 +77,18 @@ def join_meeting(driver, meet_url=MEET_URL):
     log.info(f"Navigating to Meet: {meet_url}")
     driver.get(meet_url)
 
-    wait = WebDriverWait(driver, 30)
+    wait = WebDriverWait(driver, 40)
 
-    # Wait for page to load
-    time.sleep(4)
+    # Wait for page to fully load
+    time.sleep(6)
 
-    # ── Dismiss "Got it" / cookie banners if present ──
-    for selector in ["//button[contains(text(),'Got it')]",
-                     "//button[contains(text(),'Accept all')]"]:
+    # ── Dismiss "Got it" / cookie / consent banners ──
+    for selector in [
+        "//button[contains(text(),'Got it')]",
+        "//button[contains(text(),'Accept all')]",
+        "//button[contains(text(),'Reject all')]",
+        "//button[@aria-label='Dismiss']",
+    ]:
         try:
             btn = driver.find_element(By.XPATH, selector)
             btn.click()
@@ -91,9 +96,16 @@ def join_meeting(driver, meet_url=MEET_URL):
         except NoSuchElementException:
             pass
 
+    time.sleep(2)
+
     # ── Turn off mic & camera before joining ──
-    _click_if_present(driver, "//button[@aria-label='Turn off microphone']")
-    _click_if_present(driver, "//button[@aria-label='Turn off camera']")
+    for label in [
+        "Turn off microphone",
+        "Microphone",
+        "Turn off camera",
+        "Camera",
+    ]:
+        _click_if_present(driver, f"//button[@aria-label='{label}']")
     time.sleep(1)
 
     # ── Set display name (guest join) ──
@@ -104,28 +116,60 @@ def join_meeting(driver, meet_url=MEET_URL):
         name_field.clear()
         name_field.send_keys(BOT_DISPLAY_NAME)
         log.info(f"Display name set to: {BOT_DISPLAY_NAME}")
+        time.sleep(1)
     except TimeoutException:
         log.info("Name field not found — likely signed in already.")
 
-    # ── Click Join / Ask to join ──
+    # ── Click Join / Ask to join — expanded selector list ──
     join_buttons = [
+        # Text-based
         "//button[.//span[contains(text(),'Join now')]]",
         "//button[.//span[contains(text(),'Ask to join')]]",
+        "//button[.//span[contains(text(),'Join')]]",
+        # aria-label based
+        "//button[@aria-label='Join now']",
+        "//button[@aria-label='Ask to join']",
+        "//button[@aria-label='Join call']",
+        # data attribute
         "//button[contains(@data-idom-class,'join')]",
+        # jsname based (Google Meet uses jsname attributes)
+        "//button[@jsname='Qx7uuf']",
+        "//button[@jsname='CQylAd']",
+        # Any button containing join text (case insensitive)
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'join')]",
     ]
+
     joined = False
     for xpath in join_buttons:
         try:
-            btn = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
+            btn = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.XPATH, xpath))
+            )
             btn.click()
             joined = True
-            log.info("✅ Joined the meeting!")
+            log.info(f"✅ Joined using selector: {xpath}")
             break
         except TimeoutException:
             continue
 
     if not joined:
-        log.error("❌ Could not find Join button.")
+        # Check if already in the meeting (no lobby — direct join happened)
+        try:
+            already_in = driver.find_elements(By.XPATH,
+                "//button[@aria-label='Turn off microphone'] | //button[@aria-label='Leave call']"
+            )
+            if already_in:
+                log.info("✅ Already in the meeting (direct join — no lobby)!")
+                return True
+        except Exception:
+            pass
+
+        # Take screenshot for debugging
+        try:
+            driver.save_screenshot("join_failed.png")
+            log.error("❌ Could not find Join button. Screenshot saved: join_failed.png")
+        except Exception:
+            log.error("❌ Could not find Join button.")
         return False
 
     time.sleep(5)
@@ -134,24 +178,63 @@ def join_meeting(driver, meet_url=MEET_URL):
 
 def send_chat_message(driver, message):
     """Type a message into the Google Meet chat panel."""
+    from selenium.webdriver.common.keys import Keys
     try:
-        wait = WebDriverWait(driver, 10)
+        # ── Step 1: Try to open the chat panel ──
+        chat_btn_selectors = [
+            "//button[@aria-label='Chat with everyone']",
+            "//button[@aria-label='Open chat']",
+            "//button[@aria-label='Chat']",
+            "//button[contains(@aria-label,'chat')]",
+            "//button[contains(@aria-label,'Chat')]",
+            "//button[@jsname='A5il2e']",
+            "//button[@jsname='W6suGc']",   # ← seen in debug log
+            "//button[@jsname='dqt8Pb']",   # ← seen in debug log
+            "//button[@jsname='rhHFf']",    # ← seen in debug log
+        ]
+        for sel in chat_btn_selectors:
+            _click_if_present(driver, sel)
+        time.sleep(4)
 
-        # Open chat if not already open
-        _click_if_present(driver, "//button[@aria-label='Chat with everyone']")
-        time.sleep(1)
+        # ── Step 2: Try all known chat input selectors ──
+        chat_input_selectors = [
+            "//textarea[@aria-label='Send a message']",
+            "//textarea[@aria-label='Message']",
+            "//textarea[contains(@aria-label,'message')]",
+            "//textarea[contains(@aria-label,'Message')]",
+            "//div[@aria-label='Send a message']",
+            "//div[@aria-label='Message']",
+            "//div[@contenteditable='true'][@aria-label]",
+            "//div[@role='textbox']",
+            "//div[@contenteditable='true']",
+            "//textarea",
+        ]
 
-        # Find chat input and type
-        chat_input = wait.until(EC.presence_of_element_located(
-            (By.XPATH, "//textarea[@aria-label='Send a message']")
-        ))
+        chat_input = None
+        for sel in chat_input_selectors:
+            try:
+                chat_input = WebDriverWait(driver, 2).until(
+                    EC.presence_of_element_located((By.XPATH, sel))
+                )
+                if chat_input and chat_input.is_displayed():
+                    log.info(f"💬 Chat input found via: {sel}")
+                    break
+                chat_input = None
+            except Exception:
+                continue
+
+        if not chat_input:
+            log.warning("⚠️ Chat input box not found — saving screenshot for debug.")
+            driver.save_screenshot("chat_debug.png")
+            return
+
         chat_input.click()
+        time.sleep(0.5)
         chat_input.send_keys(message)
-
-        # Send with Enter
-        from selenium.webdriver.common.keys import Keys
+        time.sleep(0.5)
         chat_input.send_keys(Keys.RETURN)
         log.info(f"💬 Chat sent: {message[:60]}...")
+
     except Exception as e:
         log.warning(f"Could not send chat message: {e}")
 

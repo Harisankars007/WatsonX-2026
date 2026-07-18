@@ -11,6 +11,7 @@ import json
 import time
 import queue
 import websocket
+from websocket import ABNF
 
 from config import (
     STT_WS_URL, STT_API_KEY,
@@ -73,10 +74,17 @@ class LiveTranscriber:
             while self.running:
                 try:
                     chunk = self.audio_queue.get(timeout=1)
-                    ws.send_binary(chunk)
+                    # Send raw binary audio using ABNF.OPCODE_BINARY
+                    ws.send(chunk, opcode=ABNF.OPCODE_BINARY)
                 except queue.Empty:
                     continue
-            ws.send(json.dumps({"action": "stop"}))
+                except Exception as e:
+                    log.warning(f"Audio send error: {e}")
+                    break
+            try:
+                ws.send(json.dumps({"action": "stop"}))
+            except Exception:
+                pass
 
         threading.Thread(target=send_audio, daemon=True).start()
 
@@ -97,6 +105,22 @@ class LiveTranscriber:
 
     def _on_ws_close(self, ws, code, msg):
         log.info(f"🔌 WebSocket closed: {code} {msg}")
+        # Auto-reconnect if bot is still running
+        if self.running:
+            log.info("🔄 Reconnecting to IBM STT in 3 seconds...")
+            time.sleep(3)
+            # Drain stale audio that built up during the gap — sending it
+            # would cause IBM STT to process old/silent frames first.
+            drained = 0
+            while not self.audio_queue.empty():
+                try:
+                    self.audio_queue.get_nowait()
+                    drained += 1
+                except queue.Empty:
+                    break
+            if drained:
+                log.info(f"🧹 Drained {drained} stale audio chunks before reconnect.")
+            threading.Thread(target=self._connect_ws, daemon=True).start()
 
     # ── Audio capture ────────────────────────────────────────────
 
@@ -122,17 +146,12 @@ class LiveTranscriber:
         p.terminate()
         log.info("🎧 Audio capture stopped.")
 
-    # ── Start / Stop ─────────────────────────────────────────────
-
-    def start(self):
-        self.running = True
-
-        # Build auth header
+    def _connect_ws(self):
+        """Connect (or reconnect) to IBM STT WebSocket."""
         credentials = f"apikey:{STT_API_KEY}"
         encoded     = base64.b64encode(credentials.encode()).decode()
         headers     = {"Authorization": f"Basic {encoded}"}
 
-        # Connect WebSocket
         self.ws = websocket.WebSocketApp(
             STT_WS_URL,
             header=headers,
@@ -141,11 +160,22 @@ class LiveTranscriber:
             on_error=self._on_ws_error,
             on_close=self._on_ws_close,
         )
-
+        # ping_interval=0 disables websocket-level pings entirely.
+        # IBM STT does NOT respond to ws pings — leaving them enabled causes
+        # "ping/pong timed out" disconnects every ~40 seconds.
         self.ws_thread = threading.Thread(
-            target=lambda: self.ws.run_forever(), daemon=True
+            target=lambda: self.ws.run_forever(ping_interval=0),
+            daemon=True
         )
         self.ws_thread.start()
+
+    # ── Start / Stop ─────────────────────────────────────────────
+
+    def start(self):
+        self.running = True
+
+        # Connect WebSocket
+        self._connect_ws()
 
         # Give WS time to connect
         time.sleep(2)

@@ -1,10 +1,16 @@
 import os
+from pathlib import Path
+from dotenv import load_dotenv
 
 # ─────────────────────────────────────────────
 # MeetBot Configuration
-# All secrets loaded from environment variables
-# Run: source .env  before starting the bot
+# Loads secrets from .env file automatically
 # ─────────────────────────────────────────────
+
+# Load .env from the meetbot directory
+_env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=_env_path)
+
 
 # Google Meet
 MEET_URL         = os.environ.get("MEET_URL", "https://meet.google.com/xxx-xxxx-xxx")
